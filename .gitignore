@@ -1,0 +1,8 @@
+profile/
+state.json
+debug/
+*.log
+login-url.txt
+venv/
+__pycache__/
+in-*.jpg

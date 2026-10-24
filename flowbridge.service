@@ -1,0 +1,17 @@
+[Unit]
+Description=Flow bridge API (Google Flow web UI -> local HTTP API)
+After=network-online.target flowbridge-xvfb.service
+Wants=network-online.target
+Requires=flowbridge-xvfb.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HOME__/flowbridge
+Environment=DISPLAY=:99
+ExecStart=__HOME__/flowbridge/venv/bin/uvicorn bridge:app --host 127.0.0.1 --port 8123
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
