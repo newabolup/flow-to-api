@@ -655,13 +655,7 @@ def _download_result(page, is_edit=False, new_srcs=None):
                 page.locator("img").first.click(timeout=5000)
             except Exception:
                 pass
-        for _ in range(15):
-            try:
-                if dl.count() and dl.first.is_visible(timeout=200):
-                    break
-            except Exception:
-                pass
-            page.wait_for_timeout(200)
+        page.wait_for_timeout(3000)
         dl = page.get_by_role("button", name="Download media")
     # Shape (2): the trigger itself downloads directly (viewer button).
     try:
@@ -1747,16 +1741,16 @@ def run_flow_job(image_path, prompt, image_model=None):
             if _model_key(wanted) != _SESS["model"]:
                 if _ensure_image_model(page, wanted=image_model, strict=bool(image_model)):
                     _SESS["model"] = _model_key(wanted)
-            baseline_srcs = None
-            if not image_path:
-                baseline_srcs = set(_wide_img_srcs(page))
             if image_path:
                 _upload_image(page, image_path)
                 _add_ingredient(page)
+            # Freshness snapshot AFTER upload (so the uploaded image is in
+            # the baseline) and before submit, for generate AND edit.
+            baseline_srcs = set(_wide_img_srcs(page))
             _start_generation(page, prompt)
             new_srcs = _wait_for_result(page, baseline_srcs=baseline_srcs)
             if isinstance(new_srcs, list):
-                data = _download_result(page, is_edit=False, new_srcs=new_srcs)
+                data = _download_result(page, is_edit=bool(image_path), new_srcs=new_srcs)
             else:
                 data = _download_result(page, is_edit=bool(image_path))
             try:
