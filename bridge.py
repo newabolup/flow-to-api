@@ -183,6 +183,18 @@ def _click(loc, timeout=15000):
 
 def check_logged_in(page):
     """True when Flow shows the app (not a sign-in wall)."""
+    try:
+        cur = page.url or ""
+    except Exception:
+        cur = ""
+    # Fast path: already on the project thread (previous job left us here
+    # with the viewer closed by Escape). A project page only renders when
+    # logged in, so no navigation is needed -- and navigating away would
+    # force ensure_project to navigate back (the double-navigation cost
+    # on every repeat job). A stale session fails loudly at generation,
+    # never silently wrong.
+    if cur.startswith("https://flow.google.com/project"):
+        return True
     page.goto("https://flow.google.com", wait_until="domcontentloaded")
     page.wait_for_timeout(4000)
     body = (page.content() or "").lower()
@@ -222,8 +234,17 @@ def ensure_project(page):
                 log.info("already on project %s, navigation skipped", url)
                 return False
         page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)
-        if "What do you want to create?" in (page.content() or ""):
+        _box_ready = False
+        for _ in range(15):
+            try:
+                _b = page.get_by_label("What do you want to create?")
+                if _b.count() and _b.first.is_visible(timeout=200):
+                    _box_ready = True
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+        if _box_ready:
             log.info("reusing project %s", url)
             return True
         log.warning("stored project did not show prompt box; creating a new one")
@@ -1713,6 +1734,28 @@ def _ensure_image_model(page, wanted=None, strict=False):
 
 
 
+def _log_post_job_state(page, tag):
+    # Best-effort diagnostics for the speed work: what the page looks
+    # like after a job (viewer open? composer visible? which URL?).
+    # Never raises; logs booleans and the URL only, never page content.
+    try:
+        url = page.url or ""
+    except Exception:
+        url = ""
+    try:
+        _b = page.get_by_label("What do you want to create?")
+        composer = bool(_b.count() and _b.first.is_visible(timeout=200))
+    except Exception:
+        composer = False
+    try:
+        _d = page.get_by_role("button", name="Download media")
+        dl_visible = bool(_d.count() and _d.first.is_visible(timeout=200))
+    except Exception:
+        dl_visible = False
+    log.info("post-job state [%s]: url=%s composer=%s download_btn=%s",
+             tag, url, composer, dl_visible)
+
+
 def run_flow_job(image_path, prompt, image_model=None):
     """Full job: browser -> project -> upload? -> prompt -> wait -> download.
     image_model: explicit model label (strict) or None for the default."""
@@ -1723,7 +1766,9 @@ def run_flow_job(image_path, prompt, image_model=None):
                 raise RuntimeError("not_logged_in: Flow session missing, owner must log in")
             navigated = ensure_project(page)
             if navigated:
-                _SESS["model"] = None
+                # The image model is a property of the stored project, so
+                # it survives navigation; the agent toggle is session
+                # state and is re-checked. Only the toggle resets here.
                 _SESS["agent"] = None
             # A leftover side panel (settings/instructions) hides the
             # composer; close it before touching the toggle or the switch.
@@ -1741,6 +1786,8 @@ def run_flow_job(image_path, prompt, image_model=None):
             if _model_key(wanted) != _SESS["model"]:
                 if _ensure_image_model(page, wanted=image_model, strict=bool(image_model)):
                     _SESS["model"] = _model_key(wanted)
+            else:
+                log.info("image-model: cache hit (%s), panel check skipped", wanted)
             if image_path:
                 _upload_image(page, image_path)
                 _add_ingredient(page)
@@ -1754,8 +1801,16 @@ def run_flow_job(image_path, prompt, image_model=None):
             else:
                 data = _download_result(page, is_edit=bool(image_path))
             try:
+                _log_post_job_state(page, "after-download")
+            except Exception:
+                pass
+            try:
                 page.keyboard.press("Escape")
                 page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            try:
+                _log_post_job_state(page, "after-escape")
             except Exception:
                 pass
             return data
