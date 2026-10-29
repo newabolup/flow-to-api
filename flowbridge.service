@@ -9,6 +9,8 @@ Type=simple
 User=__USER__
 WorkingDirectory=__HOME__/flowbridge
 Environment=DISPLAY=:99
+Environment=FLOW_IMAGE_MODEL=Nano Banana 2 Lite
+Environment=FLOW_VIDEO_MODEL=Omni 1.1 Flash
 ExecStart=__HOME__/flowbridge/venv/bin/uvicorn bridge:app --host 127.0.0.1 --port 8123
 Restart=on-failure
 RestartSec=5
