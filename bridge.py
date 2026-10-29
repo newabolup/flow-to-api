@@ -90,7 +90,15 @@ _browser_lock = threading.Lock()
 
 def _launch_browser():
     """Launch (or reuse) the persistent-context browser. Headed under Xvfb
-    when DISPLAY is set, else headless."""
+    when DISPLAY is set, else headless.
+
+    The Playwright DRIVER (_pw) lives for the whole process: stopping it
+    and calling sync_playwright().start() again in the worker thread
+    raises 'Sync API inside the asyncio loop' every time, which broke
+    every job after a 900s idle release (2026-10-29: the user's photo
+    edit failed exactly this way). So the idle watcher now closes only
+    the context, _pw is never stopped, and a new context is launched
+    from the live driver on the next job."""
     global _pw, _ctx, _page
     if _page is not None:
         try:
@@ -98,19 +106,38 @@ def _launch_browser():
                 return _page
         except Exception:
             pass
-        _page = _ctx = _pw = None
-    from playwright.sync_api import sync_playwright
-
+        _page = None
+        _ctx = None  # context died with the page; the driver stays
+    if _pw is None:
+        from playwright.sync_api import sync_playwright
+        _pw = sync_playwright().start()
     headless = not os.environ.get("DISPLAY")
-    _pw = sync_playwright().start()
-    _ctx = _pw.chromium.launch_persistent_context(
-        str(PROFILE_DIR),
-        headless=headless,
-        channel="chromium",
-        viewport={"width": 1280, "height": 900},
-        args=["--no-sandbox", "--disable-dev-shm-usage",
-              "--disable-gpu", "--disable-extensions", "--mute-audio"],
-    )
+    try:
+        _ctx = _pw.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            headless=headless,
+            channel="chromium",
+            viewport={"width": 1280, "height": 900},
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-gpu", "--disable-extensions", "--mute-audio"],
+        )
+    except Exception:
+        # Driver died (rare): drop it and retry once with a fresh start.
+        try:
+            _pw.stop()
+        except Exception:
+            pass
+        _pw = None
+        from playwright.sync_api import sync_playwright
+        _pw = sync_playwright().start()
+        _ctx = _pw.chromium.launch_persistent_context(
+            str(PROFILE_DIR),
+            headless=headless,
+            channel="chromium",
+            viewport={"width": 1280, "height": 900},
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-gpu", "--disable-extensions", "--mute-audio"],
+        )
     pages = _ctx.pages
     _page = pages[0] if pages else _ctx.new_page()
     _page.set_default_timeout(60000)
@@ -482,11 +509,30 @@ def _wait_for_result(page, timeout_s=300):
     raise RuntimeError("Timed out waiting for Flow result")
 
 
-def _download_result(page):
-    """Open the result and download the 1K original-size image."""
+def _download_result(page, is_edit=False):
+    """Open the result and download the 1K original-size image.
+
+    Three download shapes exist in Flow and all three must work, or a
+    finished generation is wasted: (1) the timeline 'Download media'
+    button opens a size menu ('1K Original size'); (2) the fullscreen
+    viewer button sometimes downloads directly; (3) the viewer menu may
+    open with different option text. (2026-10-29: an edit result landed
+    in the viewer, the first trigger click left the menu closed, and
+    'Original size' never appeared — the finished beach edit was lost.)
+    Strategy: capture a direct download from the first click if one
+    fires; else poll for the size option, then for ANY menu item
+    (preferring a size/download label), retrying the trigger once if no
+    menu is open; last resort is another direct-download click.
+    is_edit: after an edit job the visible 'Download media' button
+    belongs to the SELECTED card, which is the uploaded original, not
+    the new output (2026-10-29: two edit downloads returned the
+    pixel-identical original). Edits therefore always go through the
+    card-click path, which opens the viewer on the newest result."""
+    import re as _re
     # Click the newest result card if a Download button is not already visible.
     dl = page.get_by_role("button", name="Download media")
-    if not dl.count() or not dl.first.is_visible(timeout=5000):
+    use_visible = (not is_edit) and dl.count() and dl.first.is_visible(timeout=5000)
+    if not use_visible:
         # Click the newest timeline card: the first WIDE image in main
         # content (avatars/icons are small; timeline cards are wide).
         clicked = False
@@ -507,19 +553,68 @@ def _download_result(page):
                 page.locator("img").first.click(timeout=5000)
             except Exception:
                 pass
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(3000)
         dl = page.get_by_role("button", name="Download media")
-    _click(dl)
-    page.wait_for_timeout(1500)
+    # Shape (2): the trigger itself downloads directly (viewer button).
+    try:
+        with page.expect_download(timeout=8000) as dlinfo:
+            _click(dl)
+        dlfile = dlinfo.value
+        data = Path(dlfile.path()).read_bytes()
+        log.info("downloaded result directly: %d bytes", len(data))
+        return data
+    except Exception:
+        pass  # no direct download: a size menu should be open now
+    # Shapes (1) and (3): poll for the size option, then any menu item.
+    target = None
+    for _attempt in range(2):
+        for _ in range(6):
+            page.wait_for_timeout(1000)
+            one = page.get_by_text("1K Original size")
+            if not one.count():
+                one = page.get_by_text("Original size")
+            if one.count():
+                target = one
+                break
+            items = page.locator('[role="menuitem"], .mat-mdc-menu-item')
+            try:
+                n = items.count()
+            except Exception:
+                n = 0
+            if n:
+                picked = None
+                for it in items.all():
+                    try:
+                        txt = (it.inner_text() or "").strip()
+                    except Exception:
+                        continue
+                    if _re.search(r"Original|1K|Download|Full|Large", txt, _re.I):
+                        picked = it
+                        break
+                target = picked if picked is not None else items.first
+                break
+        if target is not None:
+            break
+        # No menu open at all: retry the trigger once.
+        try:
+            _click(dl)
+        except Exception:
+            pass
+    if target is not None:
+        try:
+            with page.expect_download(timeout=60000) as dlinfo:
+                _click(target)
+            dlfile = dlinfo.value
+            data = Path(dlfile.path()).read_bytes()
+            log.info("downloaded result: %d bytes", len(data))
+            return data
+        except Exception as exc:
+            log.warning("menu-item download failed, trying direct: %s", exc)
     with page.expect_download(timeout=60000) as dlinfo:
-        one = page.get_by_text("1K Original size")
-        if not one.count():
-            one = page.get_by_text("Original size")
-        _click(one)
+        _click(dl)
     dlfile = dlinfo.value
-    path = dlfile.path()
-    data = Path(path).read_bytes()
-    log.info("downloaded result: %d bytes", len(data))
+    data = Path(dlfile.path()).read_bytes()
+    log.info("downloaded result directly (fallback): %d bytes", len(data))
     return data
 
 
@@ -1539,7 +1634,7 @@ def run_flow_job(image_path, prompt, image_model=None):
                 _add_ingredient(page)
             _start_generation(page, prompt)
             _wait_for_result(page)
-            return _download_result(page)
+            return _download_result(page, is_edit=bool(image_path))
         except Exception:
             _save_debug(page, "jobfail")
             raise
@@ -1719,8 +1814,12 @@ threading.Thread(target=_worker, daemon=True).start()
 
 # ---------------- idle browser release (optimization 2026-10-27) ----------------
 # The headed Chromium is the heavy part of this bridge. When the service is
-# on but no job has run for IDLE_RELEASE_S, close the browser; the next job
-# relaunches it via _launch_browser. The service itself stays up.
+# on but no job has run for IDLE_RELEASE_S, close the browser CONTEXT; the
+# next job relaunches a context from the live driver via _launch_browser.
+# The driver itself is NEVER stopped here: stopping it and restarting it
+# later in the worker thread raises Playwright's 'Sync API inside the
+# asyncio loop' error and breaks every job until the service restarts
+# (2026-10-29). The driver process is tiny; the browser is what gets freed.
 IDLE_RELEASE_S = 900
 _idle_state = {"last_end": time.time()}
 
@@ -1744,13 +1843,11 @@ def _idle_watcher():
                         _ctx.close()
                 except Exception:
                     pass
-                try:
-                    if _pw is not None:
-                        _pw.stop()
-                except Exception:
-                    pass
-                _page = _ctx = _pw = None
-                log.info("idle browser released after %ss without jobs", IDLE_RELEASE_S)
+                # _pw deliberately kept alive (see _launch_browser): stopping
+                # it here breaks the next relaunch with Playwright's
+                # 'Sync API inside the asyncio loop' error (2026-10-29).
+                _page = _ctx = None
+                log.info("idle browser context released after %ss without jobs (driver kept)", IDLE_RELEASE_S)
         except Exception:
             pass
 
