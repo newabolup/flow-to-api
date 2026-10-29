@@ -195,15 +195,37 @@ def check_logged_in(page):
 
 
 def ensure_project(page):
-    """Reuse the stored bot project, or create one and store its URL."""
+    """Reuse the stored bot project, or create one and store its URL.
+    Returns True if the page navigated (session cache must reset),
+    False if it was already on the project (navigation skipped)."""
     state = load_state()
     url = state.get("project_url")
     if url:
+        try:
+            _box = page.get_by_label("What do you want to create?")
+            if _box.count() and _box.first.is_visible(timeout=1000):
+                log.info("composer already visible, navigation skipped")
+                return False
+        except Exception:
+            pass
+        try:
+            cur = (page.url or "").split("?")[0].rstrip("/")
+        except Exception:
+            cur = ""
+        base = url.split("?")[0].rstrip("/")
+        if cur and (cur == base or cur.startswith(base + "/")):
+            try:
+                body = page.content() or ""
+            except Exception:
+                body = ""
+            if "What do you want to create?" in body:
+                log.info("already on project %s, navigation skipped", url)
+                return False
         page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         if "What do you want to create?" in (page.content() or ""):
             log.info("reusing project %s", url)
-            return
+            return True
         log.warning("stored project did not show prompt box; creating a new one")
     page.goto("https://flow.google.com", wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
@@ -218,6 +240,7 @@ def ensure_project(page):
     save_state(state)
     log.info("created project %s", page.url)
     ensure_settings(page)
+    return True
 
 
 def ensure_settings(page):
@@ -468,7 +491,43 @@ def _visible_text(page):
         return ""
 
 
-def _wait_for_result(page, timeout_s=300):
+# Generate freshness + session cache (2026-10-29). The reused Flow thread
+# still shows the PREVIOUS job's completed cards and completion phrases,
+# so a bare "idle + completion phrase" wait fires before the current
+# generation finishes and the download then grabs the previous job's
+# image (proven: red-apple job returned the old blue apple, banana job
+# returned the red apple, pear job returned the banana). Generate jobs
+# therefore snapshot the timeline image URLs BEFORE submitting and only
+# accept a card whose URL was not in the snapshot. _SESS caches verified
+# session state so repeat jobs skip the per-job toggle/model checks (the
+# ~19s pre-generation overhead); any navigation resets it.
+_SESS = {"model": None, "agent": None}
+
+
+def _wide_img_srcs(page):
+    # Srcs of the timeline's wide images (the result cards), in DOM order.
+    # Same width criterion as the download's card-click path, so the
+    # snapshot and the download agree on what a card is.
+    srcs = []
+    try:
+        for img in page.locator("main img").all():
+            try:
+                bb = img.bounding_box()
+            except Exception:
+                continue
+            if bb and bb["width"] > 150:
+                try:
+                    s = img.get_attribute("src") or ""
+                except Exception:
+                    s = ""
+                if s:
+                    srcs.append(s)
+    except Exception:
+        pass
+    return srcs
+
+
+def _wait_for_result(page, timeout_s=300, baseline_srcs=None):
     """Wait until generation finishes. Completion signal (proven by
     screenshot): the prompt box goes idle again -- placeholder
     'What do you want to create?' back, no 'Thinking' indicator. The
@@ -503,13 +562,22 @@ def _wait_for_result(page, timeout_s=300):
                 or "here are the two images" in low
                 or "here are the images" in low
                 or "here is the image" in low):
-            return True
-        time.sleep(5)
+            if baseline_srcs is None:
+                return True
+            new = [s for s in _wide_img_srcs(page) if s not in baseline_srcs]
+            if new:
+                log.info("new result card detected (%d new srcs)", len(new))
+                return new
+            # Stale completion only (previous job's phrases/cards): keep
+            # waiting for the current generation's own card.
+        time.sleep(2)
     _save_debug(page, "timeout")
+    if baseline_srcs is not None:
+        raise RuntimeError("Timed out waiting for a NEW Flow result card")
     raise RuntimeError("Timed out waiting for Flow result")
 
 
-def _download_result(page, is_edit=False):
+def _download_result(page, is_edit=False, new_srcs=None):
     """Open the result and download the 1K original-size image.
 
     Three download shapes exist in Flow and all three must work, or a
@@ -531,8 +599,42 @@ def _download_result(page, is_edit=False):
     import re as _re
     # Click the newest result card if a Download button is not already visible.
     dl = page.get_by_role("button", name="Download media")
-    use_visible = (not is_edit) and dl.count() and dl.first.is_visible(timeout=5000)
-    if not use_visible:
+    card_clicked = False
+    if new_srcs:
+        # Generate freshness: click THIS job's card by src. Never use the
+        # visible button here: it belongs to the selected card, which on a
+        # reused thread is the previous job's result (the off-by-one bug).
+        try:
+            for img in page.locator("main img").all():
+                try:
+                    s = img.get_attribute("src") or ""
+                except Exception:
+                    continue
+                if s and s in new_srcs:
+                    try:
+                        bb = img.bounding_box()
+                    except Exception:
+                        bb = None
+                    if bb and bb["width"] > 150:
+                        img.click(timeout=5000)
+                        card_clicked = True
+                        break
+        except Exception:
+            pass
+        if not card_clicked:
+            log.warning("new result card not found by src, falling back to newest card")
+        for _ in range(15):
+            try:
+                if dl.count() and dl.first.is_visible(timeout=200):
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
+        dl = page.get_by_role("button", name="Download media")
+    use_visible = False
+    if not card_clicked and not new_srcs:
+        use_visible = (not is_edit) and dl.count() and dl.first.is_visible(timeout=5000)
+    if not use_visible and not card_clicked:
         # Click the newest timeline card: the first WIDE image in main
         # content (avatars/icons are small; timeline cards are wide).
         clicked = False
@@ -553,7 +655,13 @@ def _download_result(page, is_edit=False):
                 page.locator("img").first.click(timeout=5000)
             except Exception:
                 pass
-        page.wait_for_timeout(3000)
+        for _ in range(15):
+            try:
+                if dl.count() and dl.first.is_visible(timeout=200):
+                    break
+            except Exception:
+                pass
+            page.wait_for_timeout(200)
         dl = page.get_by_role("button", name="Download media")
     # Shape (2): the trigger itself downloads directly (viewer button).
     try:
@@ -1528,21 +1636,21 @@ def _ensure_image_model(page, wanted=None, strict=False):
     try:
         if not _open_agent_panel(page):
             log.warning("image-model switch: no tune Settings button")
-            return
+            return False
         try:
             body = _visible_text(page)
         except Exception:
             body = ""
         if _body_has_model(body, wkey):
             log.info("image-model switch: %s already selected, skipped", wanted)
-            return
+            return True
         options = _open_image_model_options(page)
         if not options:
             msg = f"image-model dropdown did not open for {wanted!r}"
             if strict:
                 raise RuntimeError(msg)
             log.warning("image-model switch skipped: %s", msg)
-            return
+            return False
         target = None
         for label in options:
             if label == wanted or _model_key(label) == wkey:
@@ -1558,7 +1666,7 @@ def _ensure_image_model(page, wanted=None, strict=False):
             if strict:
                 raise RuntimeError(msg)
             log.warning("image-model switch skipped: %s", msg)
-            return
+            return False
         clicked = False
         for loc in (page.get_by_text(target, exact=True),
                     page.get_by_text(wkey, exact=False)):
@@ -1592,10 +1700,12 @@ def _ensure_image_model(page, wanted=None, strict=False):
             except Exception as exc:
                 log.warning("image-model switch: Save verification skipped: %s", exc)
         log.info("image-model switch: %s row clicked=%s", wanted, clicked)
+        return clicked
     except Exception as exc:
         if strict:
             raise
         log.warning("image-model switch skipped: %s", exc)
+        return False
     finally:
         try:
             _close_agent_panel(page)
@@ -1617,25 +1727,47 @@ def run_flow_job(image_path, prompt, image_model=None):
         try:
             if not check_logged_in(page):
                 raise RuntimeError("not_logged_in: Flow session missing, owner must log in")
-            ensure_project(page)
+            navigated = ensure_project(page)
+            if navigated:
+                _SESS["model"] = None
+                _SESS["agent"] = None
             # A leftover side panel (settings/instructions) hides the
             # composer; close it before touching the toggle or the switch.
             try:
                 _close_agent_panel(page)
             except Exception:
                 pass
-            try:
-                _set_agent_toggle(page, True)
-            except Exception:
-                pass
-            _ensure_image_model(page, wanted=image_model, strict=bool(image_model))
+            if _SESS["agent"] is not True:
+                try:
+                    if _set_agent_toggle(page, True):
+                        _SESS["agent"] = True
+                except Exception:
+                    pass
+            wanted = image_model or DEFAULT_IMAGE_MODEL
+            if _model_key(wanted) != _SESS["model"]:
+                if _ensure_image_model(page, wanted=image_model, strict=bool(image_model)):
+                    _SESS["model"] = _model_key(wanted)
+            baseline_srcs = None
+            if not image_path:
+                baseline_srcs = set(_wide_img_srcs(page))
             if image_path:
                 _upload_image(page, image_path)
                 _add_ingredient(page)
             _start_generation(page, prompt)
-            _wait_for_result(page)
-            return _download_result(page, is_edit=bool(image_path))
+            new_srcs = _wait_for_result(page, baseline_srcs=baseline_srcs)
+            if isinstance(new_srcs, list):
+                data = _download_result(page, is_edit=False, new_srcs=new_srcs)
+            else:
+                data = _download_result(page, is_edit=bool(image_path))
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(1000)
+            except Exception:
+                pass
+            return data
         except Exception:
+            _SESS["model"] = None
+            _SESS["agent"] = None
             _save_debug(page, "jobfail")
             raise
 
