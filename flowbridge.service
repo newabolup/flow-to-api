@@ -7,13 +7,19 @@ Requires=flowbridge-xvfb.service
 [Service]
 Type=simple
 User=__USER__
-WorkingDirectory=__HOME__/flowbridge
+WorkingDirectory=__INSTALL_DIR__
 Environment=DISPLAY=:99
+Environment=FLOWBRIDGE_HOME=__INSTALL_DIR__
 Environment=FLOW_IMAGE_MODEL=Nano Banana 2 Lite
 Environment=FLOW_VIDEO_MODEL=Omni 1.1 Flash
-ExecStart=__HOME__/flowbridge/venv/bin/uvicorn bridge:app --host 127.0.0.1 --port 8123
-Restart=on-failure
+# Optional overrides (API key, lanes, timeouts...): /etc/flowbridge.env
+EnvironmentFile=-/etc/flowbridge.env
+ExecStart=__INSTALL_DIR__/venv/bin/uvicorn bridge:app --host 127.0.0.1 --port 8123 --no-access-log
+Restart=always
 RestartSec=5
+# Give the worker time to close Chromium cleanly (no orphan processes).
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
