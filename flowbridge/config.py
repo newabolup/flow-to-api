@@ -38,8 +38,6 @@ class Settings:
     # models --------------------------------------------------------------
     image_model: str = field(default_factory=lambda: os.environ.get(
         "FLOW_IMAGE_MODEL", "Nano Banana 2 Lite"))
-    video_model: str = field(default_factory=lambda: os.environ.get(
-        "FLOW_VIDEO_MODEL", "Omni 1.1 Flash"))
 
     # queue ---------------------------------------------------------------
     max_queue: int = field(default_factory=lambda: _env_int("FLOWBRIDGE_MAX_QUEUE", 32))
@@ -47,10 +45,7 @@ class Settings:
 
     # timeouts (seconds) --------------------------------------------------
     image_timeout: float = field(default_factory=lambda: _env_float("FLOWBRIDGE_IMAGE_TIMEOUT", 420))
-    video_timeout: float = field(default_factory=lambda: _env_float("FLOWBRIDGE_VIDEO_TIMEOUT", 900))
     result_timeout: float = field(default_factory=lambda: _env_float("FLOWBRIDGE_RESULT_TIMEOUT", 300))
-    video_result_timeout: float = field(
-        default_factory=lambda: _env_float("FLOWBRIDGE_VIDEO_RESULT_TIMEOUT", 600))
     nav_timeout: float = field(default_factory=lambda: _env_float("FLOWBRIDGE_NAV_TIMEOUT", 25))
     click_timeout: float = field(default_factory=lambda: _env_float("FLOWBRIDGE_CLICK_TIMEOUT", 12))
     probe_poll_ms: int = field(default_factory=lambda: _env_int("FLOWBRIDGE_PROBE_POLL_MS", 250))

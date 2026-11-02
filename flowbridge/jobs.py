@@ -25,7 +25,6 @@ from typing import Any
 
 from .diag import run_model_diagnose
 from .image_flow import run_image_job
-from .video_flow import run_video_job
 
 log = logging.getLogger("flowbridge.jobs")
 
@@ -218,16 +217,11 @@ class JobQueue:
         ui = self.runtime.ui()
         if job.cancel_requested:
             raise JobTimeout("job was cancelled before it started")
-        if kind == "video":
-            return run_video_job(
-                ui, payload["prompt"], video_path=payload.get("video_path"),
-                mode=payload.get("mode", "generate"),
-                resolution=payload.get("resolution", "360p"),
-                model=payload.get("model"))
         return run_image_job(ui, payload["prompt"],
                              image_path=payload.get("image_path"),
                              image_paths=payload.get("image_paths"),
-                             model=payload.get("model"))
+                             model=payload.get("model"),
+                             aspect_ratio=payload.get("aspect_ratio"))
 
     def _warmup(self) -> dict:
         ui = self.runtime.ui()

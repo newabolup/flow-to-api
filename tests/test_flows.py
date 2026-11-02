@@ -1,22 +1,10 @@
 from flowbridge.image_flow import run_image_job
 from flowbridge.media import sniff
 from flowbridge.ui import FlowError, FlowUI, NotLoggedIn
-from flowbridge.video_flow import run_video_job
-from tests.fake import MP4
 
 
 def ui_for(driver, settings, state):
     return FlowUI(driver, settings, state)
-
-
-def video_world(driver, credits=6):
-    """Pretend the composer already shows video mode after the settings step."""
-    driver.world["summary"] = ["Video · 360p · 8s · 16:9 x1"]
-    driver.world["credit_total"] = credits
-    driver.world["toggles"] = {"Mode": [{"text": "Image", "checked": False},
-                                        {"text": "Video", "checked": True}]}
-    driver.world["download_bytes"] = MP4
-    return driver
 
 
 def test_generate_happy_path(driver, settings, ctx):
@@ -28,7 +16,7 @@ def test_generate_happy_path(driver, settings, ctx):
     assert driver.uploads == []
     # the submitted prompt landed in the composer
     assert "a red apple" in driver.calls or driver.marked == "https://lh3/new-card"
-    assert driver.world["composer_text"] == "a red apple"
+    assert "a red apple" in driver.world["composer_text"]
 
 
 def test_generate_waits_for_a_new_card_not_the_old_one(driver, settings, ctx):
@@ -72,39 +60,3 @@ def test_not_logged_in_raises(driver, settings, ctx):
         assert "not_logged_in" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected NotLoggedIn")
-
-
-def test_video_generate_requires_media_and_validates_format(driver, settings, ctx):
-    ui = ui_for(driver, settings, ctx.state)
-    video_world(driver)
-    driver.world["download_bytes"] = b"\xff\xd8\xff\xe0stillimage"
-    try:
-        run_video_job(ui, "a cat playing piano")
-    except FlowError as exc:
-        assert "image instead of a video" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("expected FlowError")
-
-
-def test_video_generate_happy_path(driver, settings, ctx):
-    ui = ui_for(driver, settings, ctx.state)
-    video_world(driver)
-    data = run_video_job(ui, "a cat playing piano", resolution="360p")
-    assert sniff(data)[0] == "video/mp4"
-    # the Agent is restored to ON after a video job so image jobs keep working
-    assert driver.world["agent"] is True
-
-
-def test_video_rejects_bad_resolution_falls_back(driver, settings, ctx):
-    ui = ui_for(driver, settings, ctx.state)
-    video_world(driver)
-    data = run_video_job(ui, "p", resolution="4k")
-    assert sniff(data)[0] == "video/mp4"
-
-
-def test_video_edit_uses_ingredient_path(driver, settings, ctx):
-    ui = ui_for(driver, settings, ctx.state)
-    video_world(driver, credits=None)
-    data = run_video_job(ui, "make it sunset", video_path="/tmp/clip.mp4", mode="edit")
-    assert sniff(data)[0] == "video/mp4"
-    assert driver.uploads == ["/tmp/clip.mp4"]

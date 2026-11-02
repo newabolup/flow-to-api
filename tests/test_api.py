@@ -127,26 +127,6 @@ def test_generate_with_multiple_base64_images(ctx, settings):
     assert len(ctx.driver.uploads) == 5
 
 
-def test_video_validation(ctx, settings):
-    client = TestClient(create_app(settings, ctx=ctx))
-    with client:
-        assert client.post("/video", data={"prompt": "p", "resolution": "4k"}).status_code == 400
-        assert client.post("/video", data={"prompt": "p", "mode": "edit"}).status_code == 400
-        assert client.post("/video", data={"mode": "generate"}).status_code == 422
-
-
-def test_video_generate(ctx, settings):
-    client = TestClient(create_app(settings, ctx=ctx))
-    ctx.driver.world["download_bytes"] = b"\x00\x00\x00\x18ftypmp42" + b"0" * 32
-    ctx.driver.world["summary"] = ["Video · 360p · 8s x1"]
-    ctx.driver.world["credit_total"] = 6
-    ctx.driver.world["toggles"] = {"Mode": [{"text": "Video", "checked": True}]}
-    with client:
-        response = client.post("/video", data={"prompt": "a cat", "resolution": "360p"})
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "video/mp4"
-
-
 def test_api_key_is_enforced(ctx, settings):
     settings.api_key = "s3cret"
     client = TestClient(create_app(settings, ctx=ctx))

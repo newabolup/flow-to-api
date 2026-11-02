@@ -11,7 +11,8 @@ log = logging.getLogger("flowbridge.image")
 
 def run_image_job(ui: FlowUI, prompt: str, image_path: str | None = None,
                   image_paths: list[str] | None = None,
-                  model: str | None = None) -> bytes:
+                  model: str | None = None,
+                  aspect_ratio: str | None = None) -> bytes:
     """Full job: ready -> agent ON -> model -> upload? -> prompt -> wait -> download."""
     settings = ui.settings
     paths = list(image_paths) if image_paths else ([image_path] if image_path else [])
@@ -26,10 +27,14 @@ def run_image_job(ui: FlowUI, prompt: str, image_path: str | None = None,
         if paths:
             ui.upload_images(paths)
             ui.add_ingredients(count=len(paths))
+            ui.wait_upload_idle(20)
         # Freshness snapshot AFTER the upload (so the uploaded image is part
         # of the baseline) and before submitting.
         baseline = ui.card_srcs()
-        ui.submit(prompt)
+        target_model = model or settings.image_model
+        formatted_prompt = ui.format_model_prompt(prompt, target_model, is_edit=bool(paths),
+                                                  aspect_ratio=aspect_ratio)
+        ui.submit(formatted_prompt)
         new_srcs = ui.wait_result(settings.result_timeout, baseline)
         data = ui.download_image(new_srcs=new_srcs, is_edit=bool(paths))
     except Exception:

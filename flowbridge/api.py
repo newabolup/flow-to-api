@@ -184,7 +184,6 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
     def stats() -> dict:
         return {**ctx.queue.stats(), "settings": {
             "image_model": settings.image_model,
-            "video_model": settings.video_model,
             "idle_release_s": settings.idle_release_s,
             "max_queue": settings.max_queue,
         }}
@@ -230,6 +229,7 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
         if image_b64 and image_b64 not in all_b64:
             all_b64.append(image_b64)
 
+        aspect_ratio = payload.get("aspect_ratio")
         tmps = []
         started = time.time()
         try:
@@ -240,6 +240,7 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
                 "image_path": str(tmps[0]) if tmps else None,
                 "image_paths": [str(p) for p in tmps] if tmps else None,
                 "model": model,
+                "aspect_ratio": aspect_ratio,
             }, timeout=settings.image_timeout + 60)
         except HTTPException:
             raise
@@ -261,7 +262,8 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
              prompt: str = Form(...),
              image_b64: str = Form(default=None),
              images_b64: list[str] = Form(default=None),
-             model: str = Form(default=None)) -> Response:
+             model: str = Form(default=None),
+             aspect_ratio: str = Form(default=None)) -> Response:
         prompt = (prompt or "").strip()
         if not prompt:
             raise HTTPException(400, detail="prompt required")
@@ -288,6 +290,7 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
                 "image_path": str(tmps[0]),
                 "image_paths": [str(p) for p in tmps],
                 "model": model,
+                "aspect_ratio": aspect_ratio,
             }, timeout=settings.image_timeout + 60)
         except HTTPException:
             raise
@@ -302,41 +305,6 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
             "X-Flowbridge-Model": model or settings.image_model,
         }
         return Response(content=data, media_type=mime or "image/jpeg", headers=headers)
-
-    # ------------------------------------------------------------------- video
-    @app.post("/video", dependencies=[Depends(auth)])
-    def video(prompt: str = Form(...), video: UploadFile = File(default=None),
-              mode: str = Form("generate"), resolution: str = Form("360p"),
-              model: str = Form(default=None)) -> Response:
-        prompt = (prompt or "").strip()
-        if not prompt:
-            raise HTTPException(400, detail="prompt required")
-        if mode not in ("generate", "edit"):
-            raise HTTPException(400, detail="mode must be 'generate' or 'edit'")
-        if resolution not in ("360p", "720p"):
-            raise HTTPException(400, detail="resolution must be '360p' or '720p'")
-        if mode == "edit" and video is None:
-            raise HTTPException(400, detail="mode=edit needs a video file")
-        tmp = None
-        started = time.time()
-        try:
-            tmp = read_upload(video, None, "vin") if video is not None else None
-            data = run_job("video", {
-                "prompt": prompt, "video_path": str(tmp) if tmp else None,
-                "mode": mode, "resolution": resolution, "model": model,
-            }, timeout=settings.video_timeout + 60)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise _error_response(exc) from exc
-        finally:
-            ctx.temp.drop(tmp)
-        mime, _ = sniff(data)
-        headers = {
-            "X-Flowbridge-Ms": str(int((time.time() - started) * 1000)),
-            "X-Flowbridge-Model": model or settings.video_model,
-        }
-        return Response(content=data, media_type=mime or "video/mp4", headers=headers)
 
     # -------------------------------------------------------------------- jobs
     @app.get("/jobs/{job_id}", dependencies=[Depends(auth)])

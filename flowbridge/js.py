@@ -167,12 +167,33 @@ PROBE = r"""
 RESULT = r"""
 (baseline) => {
   const base = baseline || [];
-  const body = document.body ? (document.body.innerText || '') : '';
-  const low = body.toLowerCase();
-  if (low.indexOf('something went wrong') !== -1
-      || low.indexOf('failed to generate') !== -1
-      || low.indexOf('unusual activity') !== -1
-      || low.indexOf('could not be generated') !== -1) return 'failed';
+  const isVis = (el) => {
+    try {
+      const r = el.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) return false;
+      const s = getComputedStyle(el);
+      return s.visibility !== 'hidden' && s.display !== 'none';
+    } catch (e) { return false; }
+  };
+
+  // Check if Flow is actively generating/busy
+  const busy = [...document.querySelectorAll('mat-progress-bar,[role="progressbar"]')].some(isVis);
+  const stopBtn = Array.from(document.querySelectorAll('button')).find(
+    (b) => isVis(b) && ((b.innerText || '').toLowerCase().includes('stop') || (b.getAttribute('aria-label') || '').toLowerCase().includes('stop'))
+  );
+  if (busy || stopBtn) return false;
+
+  // Check if the latest turn reported an error (only the last few paragraphs, not old chat history)
+  const paragraphs = Array.from(document.querySelectorAll('p')).filter(isVis);
+  const recentText = paragraphs.slice(-4).map((p) => (p.innerText || '').toLowerCase()).join(' ');
+  if (recentText.indexOf('something went wrong') !== -1
+      || recentText.indexOf('failed to generate') !== -1
+      || recentText.indexOf('unusual activity') !== -1
+      || recentText.indexOf('could not be generated') !== -1) {
+    return 'failed';
+  }
+
+  // Count new result cards
   const cards = [];
   document.querySelectorAll('main img').forEach((img) => {
     const r = img.getBoundingClientRect();
@@ -182,36 +203,12 @@ RESULT = r"""
     }
   });
   if (!cards.length) return false;
-  const idle = low.indexOf('what do you want to create?') !== -1;
-  if (!idle) return false;
-  // No whole-page "thinking"/phrase check: a completed earlier turn
-  // leaves a "Show thinking" control in the page, which blocked every
-  // later job in the same thread; the baseline already proves freshness.
-  return 'done';
-}
-"""
 
-# Generation finished, no freshness snapshot (video path: the result is a
-# <video> element, so "some media exists" is the signal).
-RESULT_ANY = r"""
-() => {
   const body = document.body ? (document.body.innerText || '') : '';
   const low = body.toLowerCase();
-  if (low.indexOf('something went wrong') !== -1
-      || low.indexOf('failed to generate') !== -1
-      || low.indexOf('unusual activity') !== -1
-      || low.indexOf('could not be generated') !== -1) return 'failed';
-  const isVis = (el) => {
-    const r = el.getBoundingClientRect();
-    return r.width > 150 && r.height > 40;
-  };
-  const media = [...document.querySelectorAll('main img')].some(isVis)
-    || document.querySelectorAll('main video').length > 0;
-  if (!media) return false;
   const idle = low.indexOf('what do you want to create?') !== -1;
-  // Same fix as RESULT: no whole-page "thinking" check since completed
-  // turns leave "Show thinking" in the DOM permanently.
-  return idle ? 'done' : false;
+  if (!idle) return false;
+  return 'done';
 }
 """
 
@@ -267,7 +264,6 @@ UPLOAD_IDLE = r"""
 
 WAIT_PREDICATES = {
     "result": RESULT,
-    "result_any": RESULT_ANY,
     "composer": COMPOSER,
     "button": HAS_BUTTON,
     "text": HAS_TEXT,

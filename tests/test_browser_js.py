@@ -118,14 +118,6 @@ def test_result_predicate_reports_failure(fresh_page):
     assert driver.wait_until("result", [], timeout=3) == "failed"
 
 
-def test_result_any_predicate_works_with_previous_thinking_on_page(fresh_page):
-    driver = PageDriver(fresh_page, poll_ms=50)
-    # Simulate a previous completed turn that left 'Show thinking' in the DOM
-    fresh_page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button>Show thinking</button>')")
-    # With media on page and idle composer, result_any should resolve done without hanging
-    assert driver.wait_until("result_any", None, timeout=3) == "done"
-
-
 def test_button_and_text_predicates(page):
     driver = PageDriver(page, poll_ms=50)
     assert driver.wait_until("button", "Start generation", timeout=2) is True

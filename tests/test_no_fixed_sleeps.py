@@ -34,6 +34,6 @@ def test_no_async_endpoint_calls_a_blocking_waiter():
 
 def test_polling_sleeps_are_bounded():
     total = 0
-    for name in ("ui.py", "image_flow.py", "video_flow.py", "discovery.py"):
+    for name in ("ui.py", "image_flow.py", "discovery.py"):
         total += len(re.findall(r"time\.sleep\(", read(name)))
     assert total <= 8, f"{total} polling sleeps in the flow layer; expected <= 8"

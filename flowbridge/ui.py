@@ -298,100 +298,47 @@ class FlowUI:
         log.warning("agent settings panel did not open (tune button missing?)")
         return False
 
-    def open_image_model_options(self) -> list[str]:
-        """Open the Agent panel + image-model dropdown, return option labels."""
-        if not self.open_agent_panel():
-            return []
-        labels: list[str] = []
-        # Trigger candidates in the order that worked live: the proven
-        # 'Nano Banana 2.1' trigger first, then any visible 'Nano Banana' text.
-        for spec in (text("🍌 Nano Banana 2.1", True), text("Nano Banana 2.1"),
-                     text("Nano Banana")):
-            if labels:
-                break
-            if not self.d.visible(spec):
-                continue
-            if not self.d.click(spec, timeout=6):
-                continue
-            deadline = time.monotonic() + 6
-            while time.monotonic() < deadline:
-                probe = self.d.probe()
-                menu = [m for m in probe.get("menu", []) if m not in CHROME_LABELS]
-                if menu:
-                    labels = menu
-                    break
-                body_models = [ln.strip() for ln in probe.get("body", "").splitlines()
-                               if "Nano Banana" in ln and len(ln.strip()) <= 80]
-                if len(body_models) >= 2:
-                    labels = body_models
-                    break
-                time.sleep(self.settings.probe_poll_ms / 1000)
-        if not labels:
-            log.warning("image-model dropdown did not expose options")
-        return labels
+    def format_model_prompt(self, prompt: str, model_name: str, is_edit: bool = False,
+                            aspect_ratio: str | None = None) -> str:
+        """Inject the explicit Flow directive and optional aspect ratio so the Google
+        Flow agent switches to and executes with the exact model and aspect ratio requested."""
+        key = model_key(model_name)
+        canon = "Nano Banana 2 Lite"
+        if "pro" in key.lower():
+            canon = "Nano Banana Pro"
+        elif "2.1" in key:
+            canon = "Nano Banana 2.1"
+        action = "edit" if is_edit else "generate"
+        ar_clause = f", aspect ratio {aspect_ratio}" if aspect_ratio else ""
+        if "Nano Banana" in prompt:
+            return f"{prompt}{ar_clause}"
+        return f"Use 🍌 {canon} model to {action}: {prompt}{ar_clause}"
 
     # -------------------------------------------------------- image model set
     def ensure_image_model(self, wanted: str | None = None, strict: bool = False) -> bool:
-        """Make the project's image model `wanted`. Cached per project: a
-        verified switch is not repeated, which removes the old ~10-19s
-        settings dance from every job after the first."""
+        """Verify the requested model name is valid and cache it for prompt formatting."""
         wanted = (wanted or self.settings.image_model).strip()
         key = model_key(wanted)
-        body = self.d.probe().get("body", "")
-        if self._sess.get("model") == key and body_has_model(body, key):
-            log.info("image-model: cache hit (%s)", wanted)
-            return True
-        try:
-            if not self.open_agent_panel():
-                if strict:
-                    raise FlowError(f"could not open Agent settings to select {wanted!r}")
-                log.warning("image-model switch skipped: no settings panel")
-                return False
-            body = self.d.probe().get("body", "")
-            if body_has_model(body, key):
-                self._sess["model"] = key
-                log.info("image-model: %s already selected", wanted)
-                return True
-            options = self.open_image_model_options()
-            if not options:
-                if strict:
-                    raise FlowError(f"image-model dropdown did not open for {wanted!r}")
-                return False
-            target = None
-            for option in options:
-                if option == wanted or model_key(option) == key:
-                    target = option
-                    break
-            if target is None:
-                for option in options:
-                    if model_key(option).lower() == key.lower():
-                        target = option
-                        break
-            if target is None:
-                message = f"image model {wanted!r} not available in Flow; available: {options}"
-                if strict:
-                    raise FlowError(message)
-                log.warning("image-model switch skipped: %s", message)
-                return False
-            clicked = self.d.click_first((text(target, True), text(key)), timeout=6) is not None
-            if clicked:
-                self.d.click_first((role("button", "Save"), role("button", "Done")), timeout=4)
-                if self.d.wait_until("text", key, timeout=8):
-                    self._sess["model"] = key
-                log.info("image-model switch: %s (clicked=%s)", wanted, clicked)
-            return clicked
-        except FlowError:
-            raise
-        except Exception as exc:
+        valid_keys = {"Nano Banana Pro", "Nano Banana 2 Lite", "Nano Banana 2.1"}
+        menu = self.d.probe().get("menu", [])
+        if menu and not any(key.lower() in m.lower() for m in menu):
             if strict:
-                raise
-            log.warning("image-model switch skipped: %s", exc)
+                raise FlowError(f"image model {wanted!r} not available in Flow")
+            log.warning("model %r not in menu %s", wanted, menu)
             return False
-        finally:
-            try:
-                self.close_panels()
-            except Exception:
-                pass
+        if key not in valid_keys:
+            # Check case-insensitive match
+            match = next((v for v in valid_keys if v.lower() == key.lower()), None)
+            if match:
+                key = match
+            elif strict:
+                raise FlowError(f"image model {wanted!r} not available in Flow")
+            else:
+                log.warning("unrecognized image model %r; falling back to %s", wanted, self.settings.image_model)
+                key = model_key(self.settings.image_model)
+        self._sess["model"] = key
+        log.info("image-model selected: %s", key)
+        return True
 
     # ------------------------------------------------------- standard settings
     def open_standard_settings(self) -> bool:
@@ -465,54 +412,6 @@ class FlowUI:
                       if el.text() and el.text() not in CHROME_LABELS]
         return labels
 
-    def settings_trigger_mode(self) -> str:
-        """'video' / 'image' / 'unknown' from the composer summary buttons."""
-        for summary in self.d.probe().get("summary", []):
-            if "Video" in summary and "·" in summary:
-                return "video"
-            if "Nano Banana" in summary and re.search(r"x[1-4]\b", summary):
-                return "image"
-        return "unknown"
-
-    def set_standard_video_settings(self, model: str, resolution: str = "360p",
-                                    expect_credits: int | None = None,
-                                    strict_model: bool = False) -> None:
-        if not self.open_standard_settings():
-            raise FlowError("standard settings popup did not open")
-        self.select_toggle("Mode", "Video")
-        if not self.select_model(model):
-            labels = self.model_menu_labels()
-            if strict_model:
-                raise FlowError(
-                    f"video model {model!r} not available in Flow menu; available: {labels}")
-            log.warning("video model %r not selected (menu: %s); continuing", model, labels)
-        self.select_toggle("Video resolution", resolution)
-        self.select_toggle("Video duration", "8s")
-        self.select_toggle("Aspect ratio", "16:9")
-        self.select_toggle("Output count", "x1")
-        probe = self.d.probe()
-        total = probe.get("credit_total")
-        if total is not None:
-            log.info("video credit total shown: %s (expected %s)", total, expect_credits)
-            if expect_credits is not None and total != expect_credits:
-                raise FlowError(
-                    "video settings did not stick to "
-                    f"{model} {resolution} 8s x1 (shows {total} credits)")
-        elif expect_credits is not None:
-            raise FlowError("video credit total not found; refusing to generate unverified")
-        self.d.escape(120)
-        log.info("video settings set (%s %s 8s x1)", model, resolution)
-
-    def set_video_type(self, kind: str) -> None:
-        if not self.d.click(text(kind, True), timeout=4):
-            log.warning("video type %r not clickable; continuing", kind)
-
-    def agree_video_rights(self) -> bool:
-        for name in ("I agree — do not show again", "do not show again", "I agree"):
-            if self.d.click(role("button", name), timeout=3):
-                return True
-        return False
-
     # ---------------------------------------------------------------- uploads
     def upload_image(self, path: str) -> None:
         """Upload through the TOP Add media menu; the ingredients-panel
@@ -552,7 +451,14 @@ class FlowUI:
                     role("button", "Add ingredients", True),
                     css('button[aria-label*="Add ingredients"]')), timeout=10):
                 raise FlowError("'Add ingredients' button not found")
-            self.d.wait_until("button", "Add to prompt", timeout=8)
+            # Wait for overlay or dialog items to appear
+            try:
+                self.d.page.wait_for_selector(
+                    '.cdk-overlay-pane button.asset-item, mat-dialog-container img, [role="dialog"] img',
+                    timeout=8000
+                )
+            except Exception:
+                pass
             # Pick the corresponding ingredient from the overlay or dialog
             clicked = False
             try:
@@ -573,30 +479,27 @@ class FlowUI:
             if not clicked:
                 self.d.click_first((css('mat-dialog-container img'), css('[role="dialog"] img'),
                                     css('main img'), css("img")), timeout=6)
-            if self.d.wait_until("button", "Add to prompt", timeout=8):
-                self.d.click_first((role("button", "Add to prompt"), text("Add to prompt")), timeout=6)
-            else:
-                log.warning("'Add to prompt' never appeared; continuing")
-        self.d.wait_until("button", "Start generation", timeout=8)
 
-    def add_video_ingredient(self, path: str) -> None:
-        if not self.d.click_first((
-                role("button", "Add ingredients to the prompt box", True),
-                css('button:has-text("Add ingredients")')), timeout=10):
-            raise FlowError("'Add ingredients' button not found (video)")
-        if not self.d.upload_via(
-                lambda: self.d.click_first((role("button", "Upload media"),
-                                            text("Upload media", True)), timeout=10) is not None,
-                path, timeout=20):
-            raise FlowError("video upload chooser did not open")
-        self.wait_upload_idle(40)
-        self.agree_video_rights()
-        self.d.click_first((css('mat-dialog-container video'), css('[role="dialog"] video'),
-                            css("main video"), css("video")), timeout=6)
-        if self.d.wait_until("button", "Add to prompt", timeout=15):
-            self.d.click_first((role("button", "Add to prompt"), text("Add to prompt")), timeout=8)
-        self.agree_video_rights()
-        log.info("video ingredient added to prompt")
+            # Click Add to prompt
+            added = False
+            try:
+                added = bool(self.d.page.evaluate("""() => {
+                    const btn = Array.from(document.querySelectorAll('button')).find(
+                        b => (b.innerText || '').includes('Add to prompt') || (b.getAttribute('aria-label') || '').includes('Add to prompt')
+                    );
+                    if (btn && !btn.disabled) {
+                        btn.click();
+                        return true;
+                    }
+                    return false;
+                }"""))
+            except Exception:
+                pass
+            if not added and self.d.wait_until("button", "Add to prompt", timeout=8):
+                self.d.click_first((role("button", "Add to prompt"), text("Add to prompt")), timeout=6)
+            # Brief pause for the chip to settle in composer
+            self.d.sleep(0.6)
+        self.d.wait_until("button", "Start generation", timeout=8)
 
     # ------------------------------------------------------------------ prompt
     def submit(self, prompt: str) -> None:
@@ -624,6 +527,7 @@ class FlowUI:
         if self.d.click_first(START_SPECS, timeout=10) is None:
             self.save_debug("nostart")
             raise FlowError("'Start generation' button not found")
+        self.d.sleep(1.2)
         log.info("generation started: %r", prompt[:120])
 
     # ------------------------------------------------------------------ result
@@ -650,39 +554,21 @@ class FlowUI:
         log.info("result detected in %.1fs", time.monotonic() - started)
         return [src for src in self.card_srcs() if src not in baseline]
 
-    def wait_video_result(self, timeout: float) -> None:
-        """Video generations are slower and the result is a <video> element
-        (no image src to compare against a snapshot), so completion is
-        "idle composer + some media on the timeline"."""
-        value = self.d.wait_until("result_any", None, timeout=timeout)
-        if value == "failed":
-            raise FlowError("Flow reported a generation failure")
-        if not value:
-            self.save_debug("vidtimeout")
-            raise FlowError("Timed out waiting for the Flow video result")
-
     # ---------------------------------------------------------------- download
     def download_image(self, new_srcs: list[str] | None = None,
                        is_edit: bool = False) -> bytes:
-        """Open the result card and download the original-size image.
-
-        Fast path: fetch the rendered card directly from the browser cache
-        in ~10ms without opening modals or clicking size menus.
-        Fallback: walk the viewer -> 'Download media' -> size menu UI path.
+        """Open the result card and download the full original-size 1K image.
+        Prioritizes the official Flow viewer -> 'Download media' -> size menu path
+        to ensure full uncompressed bitrate (not thumbnail previews).
+        Falls back to direct cache fetch only if viewer interactions fail.
         """
-        if new_srcs:
-            for src in new_srcs:
-                self.d.mark_card(src)
-                data = self.d.fetch_image_bytes(src)
-                if data:
-                    log.info("downloaded result via direct cache fetch: %d bytes", len(data))
-                    return data
-
         opened = False
+        target_src = None
         if new_srcs:
-            for src in new_srcs:
+            for src in reversed(new_srcs):
                 if self.d.mark_card(src) and self.d.click_marked_card(timeout=8):
                     opened = True
+                    target_src = src
                     break
             if not opened:
                 log.warning("new result card not found by src; falling back to newest card")
@@ -693,28 +579,43 @@ class FlowUI:
         if not opened:
             cards = self.d.probe().get("cards") or []
             if cards:
-                first = sorted(cards, key=lambda c: c.get("y", 0))[0]
-                if self.d.mark_card(first["src"]):
+                # Pick the newest card (highest y position in timeline), not the oldest top card!
+                first = sorted(cards, key=lambda c: c.get("y", 0))[-1]
+                target_src = first.get("src")
+                if target_src and self.d.mark_card(target_src):
                     opened = self.d.click_marked_card(timeout=8)
             if not opened:
                 opened = self.d.click_first((css("main img"), css("img")), timeout=6) is not None
-        # Wait for the viewer's download control instead of sleeping 3s.
-        self.wait_button("Download media", timeout=12)
 
-        # Flow standard: 'Download media' opens a size menu ('1K Original size').
-        target = self._size_menu_target()
-        if target is not None:
-            data = self.d.download_after(lambda: self.d.click(target, timeout=8), timeout=90)
+        # Wait for the viewer's download control
+        if self.wait_button("Download media", timeout=10):
+            target = self._size_menu_target()
+            if target is not None:
+                data = self.d.download_after(lambda: self.d.click(target, timeout=8), timeout=90)
+                if data:
+                    log.info("downloaded full original result via size menu: %d bytes", len(data))
+                    return data
+
+            # Direct viewer download fallback
+            data = self.d.download_after(
+                lambda: self.d.click_first(DOWNLOAD_SPECS, timeout=8), timeout=5)
             if data:
-                log.info("downloaded result via size menu: %d bytes", len(data))
+                log.info("downloaded result directly from viewer: %d bytes", len(data))
                 return data
 
-        # Direct download fallback (if no size menu was opened).
-        data = self.d.download_after(
-            lambda: self.d.click_first(DOWNLOAD_SPECS, timeout=8), timeout=3)
-        if data:
-            log.info("downloaded result directly: %d bytes", len(data))
-            return data
+        # Fast cache fallback if viewer controls failed
+        if target_src:
+            data = self.d.fetch_image_bytes(target_src)
+            if data:
+                log.info("downloaded result via direct cache fallback: %d bytes", len(data))
+                return data
+        if new_srcs:
+            for src in reversed(new_srcs):
+                data = self.d.fetch_image_bytes(src)
+                if data:
+                    log.info("downloaded result via direct cache fallback: %d bytes", len(data))
+                    return data
+
         self.save_debug("nodownload")
         raise FlowError("could not download the result (download control not found)")
 
@@ -737,33 +638,3 @@ class FlowUI:
                     return text(item, True)
             return text(menu[0], True)
         return None
-
-    def download_video(self) -> bytes:
-        opened = False
-        if self.d.probe().get("videos"):
-            opened = self.d.click(css("main video"), timeout=8)
-        if not opened:
-            cards = self.d.probe().get("cards") or []
-            if cards:
-                first = sorted(cards, key=lambda c: c.get("y", 0))[0]
-                if self.d.mark_card(first["src"]):
-                    opened = self.d.click_marked_card(timeout=8)
-        self.wait_button("Download media", timeout=15)
-        data = self.d.download_after(
-            lambda: self.d.click_first(DOWNLOAD_SPECS, timeout=10), timeout=150)
-        if data:
-            return data
-
-        # Tile menu -> Download -> optional quality row. The whole walk has to
-        # happen *inside* one expect_download window, otherwise the event fires
-        # before anyone is listening and the job waits for nothing.
-        def menu_walk() -> None:
-            if self.d.click_first((role("button", "More options"),), timeout=6):
-                self.d.click_first((text("Download", True),), timeout=6)
-                self.d.click_first((text("Original size"),), timeout=6)
-
-        data = self.d.download_after(menu_walk, timeout=150)
-        if data:
-            return data
-        self.save_debug("noviddownload")
-        raise FlowError("could not download the video result")
