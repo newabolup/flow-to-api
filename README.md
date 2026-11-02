@@ -118,18 +118,31 @@ curl -X POST localhost:8123/generate -H "Content-Type: application/json" \
   -d '{"prompt": "A red apple on a wooden table", "model": "Nano Banana 2.1"}' -o out.jpg
 ```
 
-### ادیت عکس
+### ادیت و ترکیب عکس (یک یا چند تصویر)
+
+بریج می‌تواند **۱ الی ۵ (یا بیشتر)** تصویر ورودی قبول کند و آن‌ها را در کامپوزر قرار دهد:
 
 ```bash
-curl -F "image=@photo.jpg" -F "prompt=Colorize this black-and-white photo" \
+# یک عکس:
+curl -F "image=@photo.jpg" -F "prompt=Colorize this photo" \
   localhost:8123/edit -o edited.jpg
 
-curl -F "image=@photo.jpg" -F "prompt=Make the apple green" -F "model=Nano Banana Pro" \
+# چند عکس همزمان (مثلاً ۵ تصویر برای ترکیب و ادیت):
+curl -F "images=@photo1.jpg" \
+     -F "images=@photo2.jpg" \
+     -F "images=@photo3.jpg" \
+     -F "images=@photo4.jpg" \
+     -F "images=@photo5.jpg" \
+     -F "prompt=Combine all 5 images into a fantasy collage" \
+     localhost:8123/edit -o result.jpg
+
+# با مدل دلخواه:
+curl -F "images=@p1.jpg" -F "images=@p2.jpg" \
+  -F "prompt=Blend style of p1 onto p2" -F "model=Nano Banana Pro" \
   localhost:8123/edit -o edited.jpg
 ```
 
-پرامت را انگلیسی بنویسید؛ نتیجه بهتر است. به‌جای فایل می‌شود `image_b64`
-فرستاد (base64 خالص یا `data:` URI).
+پرامت را انگلیسی بنویسید؛ نتیجه بهتر است. به‌جای فایل می‌شود `image_b64` (یک عکس) یا `images_b64` (چند عکس) فرستاد (base64 خالص یا `data:` URI). همچنین در روت `/generate` نیز می‌توانید فیلد `images: ["base64...", ...]` را در بدنه JSON ارسال کنید.
 
 ### ویدیو
 

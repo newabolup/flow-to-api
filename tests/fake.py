@@ -202,9 +202,13 @@ class FakeDriver:
         self.world["composer_text"] = value
         return True
 
-    def upload_via(self, action, path: str, timeout: float = 20.0) -> bool:
+    def upload_via(self, action, path: str | list[str], timeout: float = 20.0) -> bool:
         action()
-        self.uploads.append(str(path))
+        if isinstance(path, (list, tuple)):
+            for p in path:
+                self.uploads.append(str(p))
+        else:
+            self.uploads.append(str(path))
         return True
 
     def download_after(self, action, timeout: float = 60.0):

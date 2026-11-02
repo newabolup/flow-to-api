@@ -517,35 +517,66 @@ class FlowUI:
     def upload_image(self, path: str) -> None:
         """Upload through the TOP Add media menu; the ingredients-panel
         Upload button does not work in the current UI."""
+        self.upload_images([path])
+
+    def upload_images(self, paths: list[str]) -> None:
+        """Upload one or multiple images through the TOP Add media menu."""
+        if not paths:
+            return
         self.d.escape(100)
-        if not self.d.click_first((role("button", "Add media"), text("Add media")), timeout=10):
+        if not self.d.click_first((
+                role("button", "Add media"),
+                text("Add media"),
+                css('[aria-label*="Add media"]')), timeout=10):
             raise FlowError("'Add media' button not found")
         if not self.d.upload_via(
-                lambda: self.d.click_first((role("menuitem", "Upload"), text("Upload", True)),
+                lambda: self.d.click_first((role("menuitem", "Upload"), text("Upload", True), text("Upload")),
                                            timeout=10) is not None,
-                path, timeout=20):
+                paths if len(paths) > 1 else paths[0], timeout=30):
             raise FlowError("upload file chooser did not open")
         # Wait for the asset to finish processing instead of sleeping 4s.
-        self.wait_upload_idle(25)
-        log.info("image uploaded: %s", path)
+        self.wait_upload_idle(35)
+        log.info("images uploaded (%d): %s", len(paths), paths)
 
     def add_ingredient(self) -> None:
-        """The composer '+' is named 'Add ingredients to the prompt box'
-        (aria-label); its visible text is just '+', so text matching misses."""
-        if not self.d.click_first((
-                role("button", "Add ingredients to the prompt box", True),
-                role("button", "Add ingredients", True),
-                css('button[aria-label*="Add ingredients"]')), timeout=10):
-            raise FlowError("'Add ingredients' button not found")
-        # Select the asset in the picker (scoped to the open dialog first, then
-        # the timeline) and confirm -- without a selection "Add to prompt" stays
-        # disabled and the "edit" would silently run as a plain generation.
-        self.d.click_first((css('mat-dialog-container img'), css('[role="dialog"] img'),
-                            css('main img'), css("img")), timeout=6)
-        if self.d.wait_until("button", "Add to prompt", timeout=12):
-            self.d.click_first((role("button", "Add to prompt"), text("Add to prompt")), timeout=8)
-        else:
-            log.warning("'Add to prompt' never appeared; continuing")
+        self.add_ingredients(count=1)
+
+    def add_ingredients(self, count: int = 1) -> None:
+        """Add up to `count` uploaded ingredients into the composer."""
+        if count <= 0:
+            return
+        for idx in range(count):
+            self.d.escape(80)
+            if not self.d.click_first((
+                    role("button", "Add ingredients to the prompt box", True),
+                    role("button", "Add ingredients", True),
+                    css('button[aria-label*="Add ingredients"]')), timeout=10):
+                raise FlowError("'Add ingredients' button not found")
+            self.d.wait_until("button", "Add to prompt", timeout=8)
+            # Pick the corresponding ingredient from the overlay or dialog
+            clicked = False
+            try:
+                clicked = bool(self.d.page.evaluate(f"""() => {{
+                    const items = document.querySelectorAll('.cdk-overlay-pane button.asset-item, mat-dialog-container img, [role="dialog"] img');
+                    if (items.length > {idx}) {{
+                        items[{idx}].click();
+                        return true;
+                    }}
+                    if (items.length > 0) {{
+                        items[0].click();
+                        return true;
+                    }}
+                    return false;
+                }}"""))
+            except Exception:
+                pass
+            if not clicked:
+                self.d.click_first((css('mat-dialog-container img'), css('[role="dialog"] img'),
+                                    css('main img'), css("img")), timeout=6)
+            if self.d.wait_until("button", "Add to prompt", timeout=8):
+                self.d.click_first((role("button", "Add to prompt"), text("Add to prompt")), timeout=6)
+            else:
+                log.warning("'Add to prompt' never appeared; continuing")
         self.d.wait_until("button", "Start generation", timeout=8)
 
     def add_video_ingredient(self, path: str) -> None:

@@ -129,6 +129,40 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
             return None
         return ctx.temp.write(data, prefix=field)
 
+    def read_uploads(uploads: list[UploadFile] | None, b64_list: list[str] | str | None, field: str) -> list[Path]:
+        paths = []
+        if uploads:
+            for u in uploads:
+                p = read_upload(u, None, field)
+                if p:
+                    paths.append(p)
+        if b64_list:
+            if isinstance(b64_list, str):
+                b64_str = b64_list.strip()
+                if b64_str.startswith("[") and b64_str.endswith("]"):
+                    try:
+                        import json
+                        items = json.loads(b64_str)
+                        if isinstance(items, list):
+                            for item in items:
+                                p = read_upload(None, str(item), field)
+                                if p:
+                                    paths.append(p)
+                    except Exception:
+                        p = read_upload(None, b64_str, field)
+                        if p:
+                            paths.append(p)
+                else:
+                    p = read_upload(None, b64_str, field)
+                    if p:
+                        paths.append(p)
+            elif isinstance(b64_list, (list, tuple)):
+                for b in b64_list:
+                    p = read_upload(None, b, field)
+                    if p:
+                        paths.append(p)
+        return paths
+
     # ------------------------------------------------------------------ health
     @app.get("/health")
     def health() -> dict:
@@ -185,9 +219,35 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
         if not prompt:
             raise HTTPException(400, detail="prompt required")
         model = payload.get("model")
+        image_b64 = payload.get("image_b64") or payload.get("image")
+        images_b64 = payload.get("images_b64") or payload.get("images")
+        all_b64 = []
+        if images_b64:
+            if isinstance(images_b64, list):
+                all_b64.extend(images_b64)
+            else:
+                all_b64.append(images_b64)
+        if image_b64 and image_b64 not in all_b64:
+            all_b64.append(image_b64)
+
+        tmps = []
         started = time.time()
-        data = run_job("image", {"prompt": prompt, "model": model},
-                       timeout=settings.image_timeout + 60)
+        try:
+            if all_b64:
+                tmps = read_uploads(None, all_b64, "in")
+            data = run_job("image", {
+                "prompt": prompt,
+                "image_path": str(tmps[0]) if tmps else None,
+                "image_paths": [str(p) for p in tmps] if tmps else None,
+                "model": model,
+            }, timeout=settings.image_timeout + 60)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _error_response(exc) from exc
+        finally:
+            for p in tmps:
+                ctx.temp.drop(p)
         mime, _ = sniff(data)
         headers = {
             "X-Flowbridge-Ms": str(int((time.time() - started) * 1000)),
@@ -196,25 +256,46 @@ def create_app(settings: Settings | None = None, ctx: Context | None = None) -> 
         return Response(content=data, media_type=mime or "image/jpeg", headers=headers)
 
     @app.post("/edit", dependencies=[Depends(auth)])
-    def edit(image: UploadFile = File(default=None), prompt: str = Form(...),
-             image_b64: str = Form(default=None), model: str = Form(default=None)) -> Response:
+    def edit(image: UploadFile = File(default=None),
+             images: list[UploadFile] = File(default=None),
+             prompt: str = Form(...),
+             image_b64: str = Form(default=None),
+             images_b64: list[str] = Form(default=None),
+             model: str = Form(default=None)) -> Response:
         prompt = (prompt or "").strip()
         if not prompt:
             raise HTTPException(400, detail="prompt required")
-        tmp = None
+        all_uploads = []
+        if images:
+            all_uploads.extend(images)
+        if image:
+            all_uploads.append(image)
+
+        all_b64 = []
+        if images_b64:
+            all_b64.extend(images_b64)
+        if image_b64:
+            all_b64.append(image_b64)
+
+        tmps = []
         started = time.time()
         try:
-            tmp = read_upload(image, image_b64, "in")
-            if tmp is None:
-                raise HTTPException(400, detail="image file or image_b64 is required")
-            data = run_job("image", {"prompt": prompt, "image_path": str(tmp), "model": model},
-                           timeout=settings.image_timeout + 60)
+            tmps = read_uploads(all_uploads, all_b64, "in")
+            if not tmps:
+                raise HTTPException(400, detail="image file(s) or image_b64 is required")
+            data = run_job("image", {
+                "prompt": prompt,
+                "image_path": str(tmps[0]),
+                "image_paths": [str(p) for p in tmps],
+                "model": model,
+            }, timeout=settings.image_timeout + 60)
         except HTTPException:
             raise
         except Exception as exc:
             raise _error_response(exc) from exc
         finally:
-            ctx.temp.drop(tmp)
+            for p in tmps:
+                ctx.temp.drop(p)
         mime, _ = sniff(data)
         headers = {
             "X-Flowbridge-Ms": str(int((time.time() - started) * 1000)),

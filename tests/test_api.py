@@ -78,6 +78,55 @@ def test_upload_size_limit(tmp_path):
     assert response.status_code == 413
 
 
+def test_edit_with_multiple_images_upload(ctx, settings):
+    client = TestClient(create_app(settings, ctx=ctx))
+    # Upload 5 images simultaneously
+    files = [("images", (f"img_{i}.jpg", JPEG, "image/jpeg")) for i in range(5)]
+    with client:
+        response = client.post(
+            "/edit",
+            files=files,
+            data={"prompt": "blend all 5 images together seamlessly"},
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert len(ctx.driver.uploads) == 5
+
+
+def test_edit_with_multiple_base64_images(ctx, settings):
+    import base64
+    client = TestClient(create_app(settings, ctx=ctx))
+    b64_str = base64.b64encode(JPEG).decode()
+    with client:
+        response = client.post(
+            "/edit",
+            data={
+                "prompt": "combine these photos",
+                "images_b64": [b64_str] * 5,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert len(ctx.driver.uploads) == 5
+
+
+def test_generate_with_multiple_base64_images(ctx, settings):
+    import base64
+    client = TestClient(create_app(settings, ctx=ctx))
+    b64_str = base64.b64encode(JPEG).decode()
+    with client:
+        response = client.post(
+            "/generate",
+            json={
+                "prompt": "combine 5 images",
+                "images": [b64_str] * 5,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert len(ctx.driver.uploads) == 5
+
+
 def test_video_validation(ctx, settings):
     client = TestClient(create_app(settings, ctx=ctx))
     with client:

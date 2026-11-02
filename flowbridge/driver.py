@@ -315,13 +315,16 @@ class PageDriver:
     def click_marked_card(self, timeout: float = 8.0) -> bool:
         return self.click(css('[data-flowbridge-target="1"]'), timeout=timeout)
 
-    def upload_via(self, action, path: str, timeout: float = 20.0) -> bool:
-        """Run `action` (which opens a file chooser) and push `path` into it."""
+    def upload_via(self, action, path: str | list[str] | tuple[str, ...], timeout: float = 20.0) -> bool:
+        """Run `action` (which opens a file chooser) and push `path` (or multiple paths) into it."""
         try:
             with self.page.expect_file_chooser(timeout=int(timeout * 1000)) as info:
                 if action() is False:
                     return False
-            info.value.set_files(str(path))
+            if isinstance(path, (list, tuple)):
+                info.value.set_files([str(p) for p in path])
+            else:
+                info.value.set_files(str(path))
             return True
         except Exception as exc:
             log.warning("upload_via failed: %s", exc)

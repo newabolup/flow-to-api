@@ -226,6 +226,7 @@ class JobQueue:
                 model=payload.get("model"))
         return run_image_job(ui, payload["prompt"],
                              image_path=payload.get("image_path"),
+                             image_paths=payload.get("image_paths"),
                              model=payload.get("model"))
 
     def _warmup(self) -> dict:
