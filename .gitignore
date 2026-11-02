@@ -1,8 +1,15 @@
+# runtime state (never commit: profile holds the Google session)
 profile/
 state.json
 debug/
+tmp/
 *.log
 login-url.txt
+vncpasswd
 venv/
+.venv/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
 in-*.jpg
